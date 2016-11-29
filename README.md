@@ -1,5 +1,5 @@
 # RuralRemoteMonitoring
-Multi-channel remote monitoring for rural areas
+Multi-channel remote monitoring end-to-end system for rural areas. See my Instructable for how to use this.
 
 This sketch is designed to be loaded in the Arduino IDE and run on an Edison-Mounted SIM808 module.
 
