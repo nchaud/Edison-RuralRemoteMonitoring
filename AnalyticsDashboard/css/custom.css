@@ -1,0 +1,56 @@
+/* here you can put your own css to customize and override the theme */
+
+
+/*		Analytics	*/
+
+.TTTitle
+{
+	font-size: 10px;
+}
+
+
+/*		Report Questions	*/
+
+
+.OptHint {
+    
+    font-size: 12px;
+    color:gray;
+    font-weight:bold;
+    font-style:italic;
+    
+}
+
+
+.QuestionContainer
+{
+	width: 100%;
+	margin-top: 0px;
+	margin-bottom: 20px;
+}
+
+.Question
+{
+	margin: 15px auto;
+	/*padding: 10px 0;
+	
+	/*font-weight: bold;*/
+	font-size: 14px;
+}
+
+.AnswerContainer
+{
+	margin: 10px auto;
+}
+
+
+.loadReportDesc{
+    text-align: center;
+    font-weight:bold;
+    margin:10px;
+}
+
+
+
+
+
