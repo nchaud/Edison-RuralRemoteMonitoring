@@ -6,29 +6,82 @@ Fragments of code have been borrowed from https://github.com/adafruit/Adafruit_F
 
 25-11-2016
 
-v1.0 - May this be the only version ever :|
+v1.0 - May this be the only, bug-free version ever :|
 
 Numaan Chaudhry
 numaan@plansterling.co.uk
 
  ****************************************************/
 
-/*
-
-Open up the serial console on the Arduino at 115200 baud to interact with FONA
-
-*/
+/* Import underlying functionality from the C/C++ library by Adafruit */
 #include "Adafruit_FONA.h"
 
 /* This gets set to a unique ID in the build process and linked to the hardware */
 char* MODULE_ID = "sl_001";
+
+/* Software version */
+uint8_t VERSION = 1;
+
+/* Configuration options */
+char* _smsDestination         = "+44_YOUR_NUMBER_HERE";
+char* _dataDestinationUrl     = "__YOUR_URL_HERE.bluemix.net";
+uint8_t BATT_CHARGE_THRESHOLD = 80;
+
+/* Custom APN to override default for use by GSM module */
+char * _customApnName = "";
+char * _customApnUser = "";
+char * _customApnPwd  = "";
+
+/* Status Constants */
+uint8_t GPRS_CODE_SUCCESS       = 200;
+uint8_t GPRS_CODE_ENABLE_FAIL   = 888;
+uint8_t GPRS_CODE_POST_FAIL     = 999;
+char * ERROR_GPS_ENABLE_FAILED  = "G_F";
+char * ERROR_BATT_LEVEL_FAILED  = "B_F";
+const uint8_t ERROR_SZ          = 8;
+
+
+/* Reset is tied to pin 4 */
+#define FONA_RST 4
+
+/* Enable this #define to speed-up time (for testing) */
+#define RUNTIME_TEST
+
+/* Enable this to 
+    speed-up time, 
+    write logging to Serial monitor,
+    mock receiving data from sensors,
+    disable transmitting data (to prevent running out of phone data/SMS'!) */
+#define DEBUG
+
+#ifdef DEBUG
+  #define RM_LOG2(x,y)  \
+      Serial.print (x);\
+      Serial.print (":");\
+      Serial.println (y);
+      
+   #define RM_LOG(x) \
+      Serial.println(x);
+#else
+  #define RM_LOG2(x,y)
+  #define RM_LOG(x)
+#endif
+
+/* Connection between Intel board and SIM808 FONA module */
+HardwareSerial *fonaSerial = &Serial1;
+
+/* C++ SIM808 module */
+Adafruit_FONA fona = Adafruit_FONA(FONA_RST);
+
+/* Replies from fona module are kept here */
+char replybuffer[255];
 
 /* Holds GPS data */
 struct GpsData{
   boolean success   = false;
   boolean is3DFix   = false;
   uint8_t rawSz     = 0;
-  char* raw         = NULL;      //Must be set before read
+  char* raw         = NULL;
   char* gsmLoc      = NULL;
   uint8_t gsmLocSz  = 0;
   uint16_t gsmErrCode;
@@ -47,60 +100,68 @@ struct SensorData{
   uint8_t NoOfTempReadings  = 0;
 };
 
-/* Reset is tied to pin 4 */
-#define FONA_RST 4
 
-/* Enable this #define to speed-up time (for testing) */
-#define RUNTIME_TEST
+/* Measurements storage for current cycle */
+SensorData* currSensorData;
+SensorData sensorDataArr[12];  //Store a day's worth of readings, one ~ every other hour
+uint8_t currSensorDataIdx=0; //Index of where we are in the above
+GpsData gpsData;
 
-/* Enable this to 
-    speed-up time, 
-    write logging to Serial monitor,
-    mock receiving data from sensors,
-    disable transmitting data (to prevent running out of phone data/SMS'!) */
-#define DEBUG
+/*****************/
+/* Timing fields */
+/*****************/
 
-uint8_t VERSION = 1;
+/* These are latching fields. Once set, remain set until the end of the current cycle */
+boolean _has1MinElapsed;  //Gets set and latches to true after 1 min
+boolean _has5MinElapsed;
+boolean _has15MinElapsed; //Gets set and latches to true after 15 mins
 
-char * _customApnName = "web.mtn.ci";
-char * _customApnUser = "";
-char * _customApnPwd  = "";
+/* These are true only ONCE in the FIRST loop in 1 particular cycle */
+boolean _isAtCycleStart;
+boolean _isDailyCycle;
+boolean _isWeeklyCycle;
+boolean _at1Min;
 
-char* _smsDestination     = "+447968988149";
-char* _dataDestinationUrl = "http://r.mkacars.org/do.php";
+/* These are set for 1 loop - at regular intervals - in any given cycle */
+boolean _is1SecInterval;
+boolean _is30SecInterval;
 
+boolean _gpsFetchInProgress;
+boolean _chargingInProgress;
+boolean _waitForTransmitInProgress;
 
-uint8_t GPRS_CODE_SUCCESS       = 200;
-uint8_t GPRS_CODE_ENABLE_FAIL   = 888;
-uint8_t GPRS_CODE_POST_FAIL     = 999;
-char * ERROR_GPS_ENABLE_FAILED = "G_F";
-char * ERROR_BATT_LEVEL_FAILED = "B_F";
-
+boolean __is1MinTriggered;
+unsigned long __last1SecInterval;
+unsigned long __last30SecInterval;
+unsigned long previousMillis  = 0;
+unsigned long currCycleStart  = 0; //Milliseconds when this cycle started
+unsigned long currCycleNo     = 0; //Cycle-Number of current cycle
+unsigned long _runtimeTestSpeedUpFactor = 1L * 40L * 60L * 1000L;
+unsigned long _delayBetweenCycles = 
 #ifdef DEBUG
-  #define RM_LOG2(x,y)  \
-      Serial.print (x);\
-      Serial.print (":");\
-      Serial.println (y);
-      
-   #define RM_LOG(x) \
-      Serial.println(x);
+  100;
+#elif defined(RUNTIME_TEST)
+  300;
 #else
-  #define RM_LOG2(x,y)
-  #define RM_LOG(x)
+  3 * 1000;
 #endif
 
-// this is a large buffer for replies
-char replybuffer[255];
 
-//Connection between Intel board and SIM808 FONA module
-HardwareSerial *fonaSerial = &Serial1;
+unsigned long _cycleInterval =
+#ifdef DEBUG
+  1L * 60L * 1000L; //Every few secs
+//#elif defined(RUNTIME_TEST)
+  //1L*1*1000;
+#else
+  1L * 60L * 60 * 1000L; //Every hour-3,600,000
+#endif
 
-Adafruit_FONA fona = Adafruit_FONA(FONA_RST);
 
+/* Forward declarations */
 uint8_t readline(char *buff, uint8_t maxbuff, uint16_t timeout = 0);
+uint8_t type;
 
-uint8_t type; //Type of the FONA module
-
+/* One-time Arduino setup */
 void setup() {
   
   #ifdef DEBUG
@@ -111,63 +172,17 @@ void setup() {
   fonaSerial->begin(4800);
   if (! fona.begin(*fonaSerial)) {
 
-                                                    RM_LOG(F("Failed to Iniatilise !"));
+                                                    RM_LOG(F("Failed to Initialise !"));
     return;
   }
+  
   type = fona.type();
-
-
-    //LED - initialize digital pin 13 as an output.
-    //pinMode(13, OUTPUT);
-    
-  // Optionally configure a GPRS APN, username, and password.
-  // You might need to do this to access your network's GPRS/data
-  // network.  Contact your provider for the exact APN, username,
-  // and password values.  Username and password are optional and
-  // can be removed, but APN is required.
-  //fona.setGPRSNetworkSettings(F("your APN"), F("your username"), F("your password"));
-
-  // Optionally configure HTTP gets to follow redirects over SSL.
-  // Default is not to follow SSL redirects, however if you uncomment
-  // the following line then redirects over SSL will be followed.
-  //fona.setHTTPSRedirect(true);
-
 }
-
-
-const uint8_t ERROR_SZ = 8;
-
-SensorData* currSensorData;
-SensorData sensorDataArr[12];  //Store a day's worth of readings, one every other hour
-uint8_t currSensorDataIdx=0; //Index of where we are in the above
-GpsData gpsData;
-
-/* Timing fields */
-
-//These are latching fields. Once set, remain set until the end of the current cycle
-boolean _has1MinElapsed;  //Gets set and latches to true after 1 min
-boolean _has5MinElapsed;
-boolean _has15MinElapsed; //Gets set and latches to true after 15 mins
-
-//These are true only ONCE in the FIRST loop in 1 particular cycle
-boolean _isAtCycleStart;
-boolean _isDailyCycle;
-boolean _isWeeklyCycle;
-boolean _at1Min;
-
-//These are set for 1 loop - at regular intervals - in any given cycle
-boolean _is1SecInterval;
-boolean _is30SecInterval;
-
-boolean _gpsFetchInProgress;
-boolean _chargingInProgress;
-boolean _waitForTransmitInProgress;
 
 /*
  * See comments for loop() for how this function fits into the bigger picture
  * Returns true if the cycle should continue as some sub-component needs more time
  */
-
 boolean loopCycle() {
   
   boolean doContinueCycle = false;
@@ -205,8 +220,8 @@ boolean loopCycle() {
                                                     RM_LOG2(F("GSM RawData"),gpsData.raw); //1 way of keeping log statements out of the way !
             execTransmitGps();
           
-            _gpsFetchInProgress = false;//!gpsDone;
-            doContinueCycle |=    false;//!gpsDone;
+            _gpsFetchInProgress = false;
+            doContinueCycle |=    false;
       }
       else {
         
@@ -248,33 +263,6 @@ boolean loopCycle() {
   
   return doContinueCycle;
 }
-
-boolean __is1MinTriggered;
-unsigned long __last1SecInterval;
-unsigned long __last30SecInterval;
-unsigned long previousMillis  = 0;
-unsigned long currCycleStart  = 0; //Milliseconds when this cycle started
-unsigned long currCycleNo     = 0; //Cycle-Number of current cycle
-unsigned long _runtimeTestSpeedUpFactor = 1L * 40L * 60L * 1000L;
-unsigned long _delayBetweenCycles = 
-#ifdef DEBUG
-  100;
-#elif defined(RUNTIME_TEST)
-  300;
-#else
-  3 * 1000;
-#endif
-
-
-
-unsigned long _cycleInterval =
-#ifdef DEBUG
-  1L * 60L * 1000L; //Every few secs
-//#elif defined(RUNTIME_TEST)
-  //1L*1*1000;
-#else
-  1L * 60L * 60 * 1000L; //Every hour-3,600,000
-#endif
 
 unsigned long getCycleIntervalInHours() {
 
@@ -328,15 +316,15 @@ void loop() {
         
         //Set flags
         _isAtCycleStart = true;
-        if (currCycleNo % ((1000L * 60L * 60L * 24L) / _delayBetweenCycles) == 0 ) //TODO: What about time elapsed whilst a cycle is running?
+        if (currCycleNo % ((1000L * 60L * 60L * 24L) / _delayBetweenCycles) == 0 )
           _isDailyCycle = true;
         if (currCycleNo % ((1000L * 60L * 60L * 24L * 7L) / _delayBetweenCycles) == 0)
           _isWeeklyCycle = true; 
 
 #ifdef DEBUG
+//  Simulate a weekly cycle for GPS
 //  if (currCycleNo==1)_isWeeklyCycle=true;
 #endif
-
 
         sensorDataArr[currSensorDataIdx] = SensorData();
         currSensorData = &sensorDataArr[currSensorDataIdx];
@@ -385,16 +373,6 @@ void loop() {
           __last30SecInterval = currentMillis;
       }    
   
-                                              //RM_LOG2("_isAtCycleStart",_isAtCycleStart);
-                                              //RM_LOG("_at1Min",_at1Min);
-                                              //RM_LOG("_has1MinElapsed",_has1MinElapsed);
-                                              //RM_LOG("_has5MinElapsed",_has5MinElapsed);
-                                              //RM_LOG("_has15MinElapsed",_has15MinElapsed);
-                                              //RM_LOG("_is30SecInterval",_is30SecInterval);
-                                              //RM_LOG("_is1SecInterval",_is1SecInterval);
-                                              //RM_LOG2("_gpsFetchInProgress",_gpsFetchInProgress);
-                                              //RM_LOG2("_chargingInProgress",_chargingInProgress);
-  
       //Run the cycle !
       doContinue = loopCycle();
   
@@ -406,12 +384,7 @@ void loop() {
       _isDailyCycle = false;
       _isWeeklyCycle = false;
         
-    
-
-
-    //TODO: Check errors array
-
-    
+        
     //If cycle complete, wait for interval to elapse again
     if (!doContinue) {
                                             RM_LOG(F("END CYCLE"));
@@ -422,20 +395,10 @@ void loop() {
   }
   
 
-        //Try POST to site with large timeout
-        //(2 minutes)
-
-
-        //Set GPS LED Blinking
-
   delay(_delayBetweenCycles);
 }
 
-        //measure ttf ! and temp!
-        //discard analog reading too low
-        //what is ADC-voltage ??
-        //use fona rtc?
-
+/* Initialises the provided buffer with data to send */
 char* initBufferForSend(char* buffer, uint16_t errorCode) {
   
   //Get network diagnostics
@@ -467,17 +430,12 @@ char* initBufferForSend(char* buffer, uint16_t errorCode) {
   sprintf(curr, "%03d", errorCode);
   curr+=3;
 
-                                              RM_LOG2(F("GSM RawData9"),gpsData.raw);
-                                              RM_LOG2(F("BUFFER"),buffer);
-  //Curr cycle no, padded to 3 chars
-  //////sprintf(curr, "%03d", currCycleNo); //TODO: Cant go back in?
-  //////curr+=3;
-        
-                                              RM_LOG2(F("GSM RawData10"),gpsData.raw);
-                                              RM_LOG2(F("BUFFER"),buffer);
+                                              //RM_LOG2(F("GSM RawData9"),gpsData.raw);
+                                              //RM_LOG2(F("BUFFER"),buffer);
   return curr;
 }
 
+/* Transmits GPS readings via GPRS or SMS (fallback) */
 void execTransmitGps() {
 
                                               
@@ -501,6 +459,7 @@ void execTransmitGps() {
     }
 }
 
+/* Transmits sensor measurements via GPRS or SMS (fallback) */
 void execTransmitReadings() {
   
       char netBuffer[(15*12)+20]; //12 readings+header
@@ -534,6 +493,7 @@ void execTransmitReadings() {
 }
 
 
+/* Transmits the given data via GPRS. Returns a status-code corresponding to the HTML code received from server. */
 uint16_t sendViaGprs(char* data) {
   
                                                       RM_LOG2(F("Sending via GPRS"),data);
@@ -598,6 +558,7 @@ uint16_t sendViaGprs(char* data) {
       return ret;
 }
 
+/* Transmits the given data via SMS. Returns 0 on success, 1 on failure. */
 uint8_t sendViaSms(char* data) {
 
                                                       RM_LOG2(F("Sending via SMS"),data);
@@ -614,6 +575,7 @@ uint8_t sendViaSms(char* data) {
 #endif
 }
 
+/* Reads analog sensors and stores in current cycle measurements */
 void readSensorsAsync() {
   //Collect sensor data for 1 minute, calc average, remove outliers
 
@@ -628,22 +590,31 @@ void readSensorsAsync() {
       currSensorData->VBatt = (currReading + batt)/currSensorData->NoOfBattReadings; //Will be >0 denom because of above
     }
     
-    int pv = analogRead(A1);
-    if (pv > 0) {
-      
-      float currReading = currSensorData->VPV * currSensorData->NoOfPVReadings;
-      currSensorData->NoOfPVReadings++;
-      currSensorData->VPV = (currReading + pv)/currSensorData->NoOfPVReadings; //Will be >0 denom because of above
-    }
-                                                      //RM_LOG2(F("Sensors-VPV"), cData.VPV);
-    
-    int curr = analogRead(A2);
+    int curr = analogRead(A1);
     if (curr > 0) {
       
       float currReading = currSensorData->Current * currSensorData->NoOfCurrReadings;
       currSensorData->NoOfCurrReadings++;
       currSensorData->Current = (currReading + curr)/currSensorData->NoOfCurrReadings; //Will be >0 denom because of above
     }
+    
+    int pv = analogRead(A2);
+    if (pv > 0) {
+      
+      float currReading = currSensorData->VPV * currSensorData->NoOfPVReadings;
+      currSensorData->NoOfPVReadings++;
+      currSensorData->VPV = (currReading + pv)/currSensorData->NoOfPVReadings; //Will be >0 denom because of above
+    }
+    
+    int temp = analogRead(A5);
+    if (temp > 0) {
+      
+      float currReading = currSensorData->Temp * currSensorData->NoOfTempReadings;
+      currSensorData->NoOfTempReadings++;
+      currSensorData->Temp = (currReading + temp)/currSensorData->NoOfTempReadings; //Will be >0 denom because of above
+    }
+                                                      //RM_LOG2(F("Sensors-VPV"), cData.VPV);
+    
                                                      // RM_LOG2(F("Sensors-Curr"), cData.Current);
 
 #ifdef DEBUG
@@ -654,13 +625,11 @@ void readSensorsAsync() {
 
 }
 
-
-
 void addError(char* err) {  
-  //TODO : use this and also clear at cycle end
-                                                    RM_LOG2(F("Adding Error"), err);
+      RM_LOG2(F("Adding Error"), err);
 }
 
+/* Populates the supplied buffer with GPS data from current cycle */
 void loadDataForGps(char* buffer, int maxSize) {
     char* curr = buffer;
 
@@ -719,6 +688,7 @@ void loadDataForGps(char* buffer, int maxSize) {
 }
 
 
+/* Populates the supplied buffer with sensor readings data from current cycle */
 void loadDataForReadings(char* buffer, int maxSize) {
 
     char* curr = buffer;
@@ -769,7 +739,7 @@ void loadDataForReadings(char* buffer, int maxSize) {
     }
 }
 
-/*** Battery ***/
+/* Checks battery level and returns true if needs more time to charge the battery */
 boolean ensureBatteryLevel() {
 
      uint16_t vbat;
@@ -782,12 +752,12 @@ boolean ensureBatteryLevel() {
                                                     RM_LOG2(F("BatteryLevel Retrieved"), vbat);
 
         //Require charging if less than threshold
-        return vbat <= 80;
+        return vbat <= BATT_CHARGE_THRESHOLD;
     }
 }
 
 
-/*** GPS ***/
+/* Kicks off the GPS-Refresh process */
 void triggerGpsRefreshAsync() {
 
                                                     RM_LOG(F("GPS - Switching On"));
@@ -798,6 +768,7 @@ void triggerGpsRefreshAsync() {
    //   addError("P-EB");
 }
 
+/* Retrieves GPS data from GPS sub-module and stores in current cycle data*/
 GpsData getGpsSensorData() {
 
     GpsData ret;
@@ -856,10 +827,12 @@ GpsData getGpsSensorData() {
     return ret;
 }
 
+/* Ends the GPS retrieval process */
 void onGpsComplete() {
                                                     RM_LOG(F("GPS Shutting down"));
   fona.enableGPS(false);
   //fona.enableGPRS(false);
 }
+
 
 
